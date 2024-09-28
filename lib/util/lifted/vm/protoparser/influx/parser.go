@@ -1224,6 +1224,14 @@ func (tag *Tag) Reset() {
 	tag.IsArray = false
 }
 
+func (tag *Tag) Clone() Tag {
+	return Tag{
+		Key:     tag.Key,
+		Value:   tag.Value,
+		IsArray: tag.IsArray,
+	}
+}
+
 func (tag *Tag) unmarshal(s string, noEscapeChars, enableTagArray bool) error {
 	tag.Reset()
 	n := nextUnescapedChar(s, '=', noEscapeChars, enableTagArray, false)

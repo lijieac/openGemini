@@ -754,6 +754,55 @@ func (dbPT *DBPTInfo) SetParams(preload bool, lockPath *string, enableTagArray b
 	dbPT.enableTagArray = enableTagArray
 }
 
+func (dbPT *DBPTInfo) NewIndexBuilder(rp string, shardID uint64, timeRangeInfo *meta.ShardTimeRangeInfo, client metaclient.MetaClient, engineType config.EngineType) {
+	var err error
+	rpPath := path.Join(dbPT.path, rp)
+
+	indexID := timeRangeInfo.OwnerIndex.IndexID
+	lock := fileops.FileLockOption(*dbPT.lockPath)
+	indexBuilder, ok := dbPT.indexBuilder[indexID]
+	if !ok && !config.IsLogKeeper() {
+
+		indexPath := strconv.Itoa(int(indexID)) + pathSeparator + strconv.Itoa(int(meta.MarshalTime(timeRangeInfo.OwnerIndex.TimeRange.StartTime))) +
+			pathSeparator + strconv.Itoa(int(meta.MarshalTime(timeRangeInfo.OwnerIndex.TimeRange.EndTime)))
+		iPath := path.Join(rpPath, config.IndexFileDirectory, indexPath)
+
+		if err := fileops.MkdirAll(iPath, 0750, lock); err != nil {
+			return nil, err
+		}
+
+		indexIdent := &meta.IndexIdentifier{OwnerDb: dbPT.database, OwnerPt: dbPT.id, Policy: rp}
+		indexIdent.Index = &meta.IndexDescriptor{IndexID: indexID,
+			IndexGroupID: timeRangeInfo.OwnerIndex.IndexGroupID, TimeRange: timeRangeInfo.OwnerIndex.TimeRange}
+
+		opts := new(tsi.Options).
+			Ident(indexIdent).
+			Path(iPath).
+			IndexType(index.MergeSet).
+			EngineType(engineType).
+			StartTime(timeRangeInfo.OwnerIndex.TimeRange.StartTime).
+			EndTime(timeRangeInfo.OwnerIndex.TimeRange.EndTime).
+			Duration(timeRangeInfo.ShardDuration.DurationInfo.Duration).
+			CacheDuration(timeRangeInfo.OwnerIndex.TimeRange.EndTime.Sub(timeRangeInfo.OwnerIndex.TimeRange.StartTime)).
+			LogicalClock(dbPT.logicClock).
+			SequenceId(&dbPT.sequenceID).
+			Lock(dbPT.lockPath)
+
+		// init indexBuilder and default indexRelation
+		indexBuilder = tsi.NewIndexBuilder(opts)
+		indexBuilder.EnableTagArray = dbPT.enableTagArray
+		dbPT.indexBuilder[indexID] = indexBuilder
+		primaryIndex, _ := tsi.NewIndex(opts)
+		primaryIndex.SetIndexBuilder(indexBuilder)
+		indexRelation, _ := tsi.NewIndexRelation(opts, primaryIndex, indexBuilder)
+		dbPT.indexBuilder[indexID].Relations[uint32(index.MergeSet)] = indexRelation
+		err = indexBuilder.Open()
+		if err != nil {
+			return nil, err
+		}
+	}
+}
+
 func (dbPT *DBPTInfo) NewShard(rp string, shardID uint64, timeRangeInfo *meta.ShardTimeRangeInfo, client metaclient.MetaClient, engineType config.EngineType) (Shard, error) {
 	var err error
 	rpPath := path.Join(dbPT.path, rp)

@@ -258,6 +258,30 @@ func (csIdx *CsIndexImpl) CreateIndexIfNotExistsByCol(idx *MergeSetIndex, col *T
 	return nil
 }
 
+const (
+	halfHour int64 = 1800000000000
+)
+
+type itemInfo struct {
+	vkey  []byte
+	vname []byte
+	tags  []influx.Tag
+}
+
+func newItemInfo(vkey, vname []byte, tags []influx.Tag) *itemInfo {
+	item := &itemInfo{
+		vkey:  make([]byte, 0, len(vkey)),
+		vname: make([]byte, 0, len(vname)),
+		tags:  make([]influx.Tag, 0, len(tags)),
+	}
+	copy(item.vkey, vkey)
+	copy(item.vname, vname)
+	for i := 0; i < len(tags); i++ {
+		item.tags = append(item.tags, tags[i].Clone())
+	}
+	return item
+}
+
 type MergeSetIndex struct {
 	tb               *mergeset.Table
 	logger           *logger.Logger
@@ -281,14 +305,19 @@ type MergeSetIndex struct {
 	StorageIndex StorageIndex
 
 	config *config.Index
+
+	nextIndexBuilder *IndexBuilder
+	nextIndex        *MergeSetIndex
+	itemsChan        chan *itemInfo
 }
 
 func NewMergeSetIndex(opts *Options) (*MergeSetIndex, error) {
 	ms := &MergeSetIndex{
-		path:   opts.path,
-		lock:   opts.lock,
-		logger: logger.NewLogger(errno.ModuleIndex),
-		config: config.GetIndexConfig(),
+		path:      opts.path,
+		lock:      opts.lock,
+		logger:    logger.NewLogger(errno.ModuleIndex),
+		config:    config.GetIndexConfig(),
+		itemsChan: make(chan *itemInfo, 8196),
 	}
 
 	switch opts.engineType {
@@ -341,6 +370,7 @@ func (idx *MergeSetIndex) Open() error {
 	once.Do(initQueueSize)
 	idx.StorageIndex.initQueues(idx)
 	idx.run()
+	go idx.createIndexForNextDuation()
 	idx.isOpen = true
 
 	return nil
@@ -664,7 +694,28 @@ func (idx *MergeSetIndex) CreateIndexIfNotExistsByRow(row *influx.Row) (uint64, 
 
 	// original path
 	sid, err := idx.createIndexesIfNotExists(vkey.B, vname.B, row.Tags)
+	// for next duration index
+	if row.Timestamp+halfHour > idx.indexBuilder.endTime.UnixNano() {
+		idx.CreateIndexForNextDuration(vkey.B, vname.B, row.Tags)
+	}
 	return sid, err
+}
+
+func (idx *MergeSetIndex) CreateIndexForNextDuration(vkey, vname []byte, tags []influx.Tag) {
+	if idx.nextIndex != nil {
+		return
+	}
+
+	item := newItemInfo(vkey, vname, tags)
+	idx.nextIndex.itemsChan <- item
+}
+
+func (idx *MergeSetIndex) createIndexForNextDuation() {
+	for item := range idx.itemsChan {
+		if idx.nextIndex != nil {
+			_, _ = idx.nextIndex.createIndexesIfNotExists(item.vkey, item.vname, item.tags)
+		}
+	}
 }
 
 func (idx *MergeSetIndex) createIndexesIfNotExists(vkey, vname []byte, tags []influx.Tag) (uint64, error) {
@@ -1470,6 +1521,7 @@ func (idx *MergeSetIndex) Close() error {
 		return err
 	}
 
+	close(idx.itemsChan)
 	idx.isOpen = false
 	return nil
 }
